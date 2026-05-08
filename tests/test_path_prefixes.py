@@ -29,7 +29,6 @@ _ENV_VARS_TO_ISOLATE = (
     "EMBEDDING_BINDING_API_KEY",
     "EMBEDDING_MODEL",
     "LIGHTRAG_API_PREFIX",
-    "LIGHTRAG_WEBUI_PATH",
     "LIGHTRAG_KV_STORAGE",
     "LIGHTRAG_VECTOR_STORAGE",
     "LIGHTRAG_GRAPH_STORAGE",
@@ -241,84 +240,33 @@ class TestOpenAPISpecIntegration:
 
 
 class TestWebUIPrefixIntegration:
-    """Test that WebUI is served at the correct path."""
+    """Test that the WebUI is served at the expected (fixed) /webui path,
+    composed with `root_path` when an API prefix is set."""
 
     def test_webui_at_prefixed_path(self, mock_args_api_prefix):
-        """Test WebUI assets are at the prefixed path.
-
-        When root_path is set, the WebUI is served under {root_path}{webui_path}
-        because FastAPI injects root_path into the ASGI scope.
-        """
+        """With root_path="/test-api" the WebUI lives at /test-api/webui/
+        because FastAPI injects root_path into the ASGI scope."""
         with patch("lightrag.api.lightrag_server.LightRAG") as mock_rag:
             mock_rag.return_value = MagicMock()
             from lightrag.api.lightrag_server import create_app
-            from lightrag.api.config import parse_args
 
-            original_argv = sys.argv.copy()
-            try:
-                sys.argv = [
-                    "lightrag-server",
-                    "--api-prefix",
-                    "/test-api",
-                    "--webui-path",
-                    "/test-webui",
-                ]
-                args = parse_args()
-                app = create_app(args)
-                client = TestClient(app)
+            app = create_app(mock_args_api_prefix)
+            client = TestClient(app)
 
-                # With root_path="/test-api" and webui_path="/test-webui",
-                # the WebUI is accessible at /test-api/test-webui/
-                # (root_path + webui_path, since FastAPI injects root_path)
-                response = client.get("/test-api/test-webui/")
-                assert response.status_code in [200, 307]
-            finally:
-                sys.argv = original_argv
+            response = client.get("/test-api/webui/")
+            assert response.status_code in [200, 307]
 
-    def test_webui_without_api_prefix(self):
-        """Test WebUI works with custom path when no API prefix is set."""
+    def test_webui_without_api_prefix(self, mock_args_no_prefix):
+        """Without an API prefix the WebUI is served at /webui/."""
         with patch("lightrag.api.lightrag_server.LightRAG") as mock_rag:
             mock_rag.return_value = MagicMock()
             from lightrag.api.lightrag_server import create_app
-            from lightrag.api.config import parse_args
 
-            original_argv = sys.argv.copy()
-            try:
-                sys.argv = ["lightrag-server", "--webui-path", "/test-webui"]
-                args = parse_args()
-                app = create_app(args)
-                client = TestClient(app)
+            app = create_app(mock_args_no_prefix)
+            client = TestClient(app)
 
-                response = client.get("/test-webui/")
-                assert response.status_code in [200, 307]
-            finally:
-                sys.argv = original_argv
-
-    def test_webui_not_at_default_path_with_custom(self, mock_args_api_prefix):
-        """Test /webui returns 404 when custom path is set."""
-        with patch("lightrag.api.lightrag_server.LightRAG") as mock_rag:
-            mock_rag.return_value = MagicMock()
-            from lightrag.api.lightrag_server import create_app
-            from lightrag.api.config import parse_args
-
-            original_argv = sys.argv.copy()
-            try:
-                sys.argv = [
-                    "lightrag-server",
-                    "--api-prefix",
-                    "/test-api",
-                    "--webui-path",
-                    "/test-webui",
-                ]
-                args = parse_args()
-                app = create_app(args)
-                client = TestClient(app)
-
-                # /webui should not exist when custom path is set
-                response = client.get("/webui/")
-                assert response.status_code == 404
-            finally:
-                sys.argv = original_argv
+            response = client.get("/webui/")
+            assert response.status_code in [200, 307]
 
 
 class TestEnvironmentVariables:
@@ -335,23 +283,10 @@ class TestEnvironmentVariables:
         finally:
             del os.environ["LIGHTRAG_API_PREFIX"]
 
-    def test_env_webui_path(self):
-        """Test LIGHTRAG_WEBUI_PATH environment variable."""
-        from lightrag.api.config import get_env_value
-
-        os.environ["LIGHTRAG_WEBUI_PATH"] = "unit-test-front/webui"
-        try:
-            value = get_env_value("LIGHTRAG_WEBUI_PATH", "/webui")
-            assert value == "unit-test-front/webui"
-        finally:
-            del os.environ["LIGHTRAG_WEBUI_PATH"]
-
-
 class TestPathNormalization:
-    """User input may contain trailing slashes, missing leading slash, or be
-    just '/'. create_app must canonicalize these before passing to FastAPI
-    (root_path) and Starlette (app.mount), neither of which accept arbitrary
-    strings."""
+    """User input for `--api-prefix` may contain trailing slashes, a missing
+    leading slash, or be just '/'. create_app must canonicalize these before
+    passing to FastAPI's `root_path`, which doesn't accept arbitrary strings."""
 
     def _build(self, *cli_args):
         # sys.argv must be the lightrag-server form *before* lightrag_server is
@@ -385,27 +320,6 @@ class TestPathNormalization:
     def test_api_prefix_missing_leading_slash_added(self):
         app = self._build("--api-prefix", "api/v1")
         assert app.root_path == "/api/v1"
-
-    def test_webui_path_trailing_slash_does_not_crash_mount(self):
-        """Starlette's app.mount asserts paths do not end in '/'. The
-        previous code passed user input through verbatim, which would crash
-        at startup if a user set LIGHTRAG_WEBUI_PATH=/webui/.
-
-        We assert that create_app() returns a working app (i.e. no
-        AssertionError raised inside Starlette) and that the WebUI is
-        reachable at the normalized path.
-        """
-        app = self._build("--webui-path", "/custom-ui/")
-        client = TestClient(app)
-        response = client.get("/custom-ui/")
-        assert response.status_code in (200, 307, 404)
-
-    def test_webui_path_slash_only_falls_back_to_default(self):
-        """`--webui-path /` is degenerate; must fall back to /webui."""
-        app = self._build("--webui-path", "/")
-        client = TestClient(app)
-        response = client.get("/webui/")
-        assert response.status_code in (200, 307, 404)
 
 
 class TestRuntimeConfigInjection:
@@ -468,9 +382,7 @@ class TestRuntimeConfigInjection:
         """With api_prefix=/site01, the injected script must carry both the
         api prefix and the composed webui prefix the browser will see."""
         self._stage_index_html(tmp_path)
-        app = self._build_app(
-            tmp_path, monkeypatch, "--api-prefix", "/site01", "--webui-path", "/webui"
-        )
+        app = self._build_app(tmp_path, monkeypatch, "--api-prefix", "/site01")
         client = TestClient(app)
 
         response = client.get("/site01/webui/")

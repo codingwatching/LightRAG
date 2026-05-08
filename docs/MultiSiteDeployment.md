@@ -9,7 +9,7 @@ This document explains how to run multiple isolated LightRAG instances behind on
 
 ## TL;DR
 
-- Set `LIGHTRAG_API_PREFIX` and `LIGHTRAG_WEBUI_PATH` per-instance, on the **backend only**.
+- Set `LIGHTRAG_API_PREFIX` per-instance, on the **backend only**. The WebUI is always mounted at `/webui` (not configurable).
 - Build the WebUI **once**. The same artifacts work under any reverse-proxy prefix.
 - Point your reverse proxy at each backend, stripping the site prefix before forwarding.
 
@@ -26,7 +26,7 @@ docker run -e LIGHTRAG_API_PREFIX=/site02 -p 9622:9621 lightrag:latest
 Earlier versions of LightRAG baked the site prefix into the JavaScript bundle at build time (via `VITE_API_PREFIX` / `VITE_WEBUI_PREFIX`). Every site that used a different prefix needed its own WebUI build, and reusing a single Docker image across sites required a rebuild step at deploy time. Since the runtime-config-injection refactor:
 
 - **Asset URLs** in `index.html` are emitted as relative paths (`./assets/index-abc.js`). The browser resolves them against the current document URL, so they work under any mount point.
-- **API base URL** and **in-app links** read their prefix from `window.__LIGHTRAG_CONFIG__`, which the FastAPI server injects into `index.html` on each response based on its own `LIGHTRAG_API_PREFIX` / `LIGHTRAG_WEBUI_PATH`.
+- **API base URL** and **in-app links** read their prefix from `window.__LIGHTRAG_CONFIG__`, which the FastAPI server injects into `index.html` on each response based on its own `LIGHTRAG_API_PREFIX`.
 
 The result: a single `lightrag/api/webui/` directory (or Docker image) is reusable across any number of sites with no per-site build artifact.
 
@@ -40,7 +40,7 @@ Each request for `index.html` goes through `SmartStaticFiles` in `lightrag/api/l
 2. Looks for the placeholder comment `<!-- __LIGHTRAG_RUNTIME_CONFIG__ -->`.
 3. Replaces it with
    `<script>window.__LIGHTRAG_CONFIG__ = {"apiPrefix":"…","webuiPrefix":"…"}</script>`,
-   computed from the configured `LIGHTRAG_API_PREFIX` / `LIGHTRAG_WEBUI_PATH`.
+   computed from the configured `LIGHTRAG_API_PREFIX` (the in-app `/webui` mount is hardcoded server-side).
 
 Sequence — browser request to a site-prefixed instance:
 
@@ -69,14 +69,13 @@ and in-app links.
 
 ---
 
-## Two backend variables, that's it
+## One backend variable, that's it
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `LIGHTRAG_API_PREFIX` | `""` | Reverse-proxy prefix that the upstream proxy strips before forwarding to FastAPI. Passed to FastAPI as `root_path`. |
-| `LIGHTRAG_WEBUI_PATH` | `/webui` | In-app mount path for the WebUI **after** the proxy has stripped the API prefix. Leave as `/webui` unless you have a specific reason to relocate it. |
 
-`window.__LIGHTRAG_CONFIG__.webuiPrefix` is computed as `LIGHTRAG_API_PREFIX + LIGHTRAG_WEBUI_PATH + "/"`. You do **not** set this yourself.
+The WebUI is always mounted at `/webui` server-side. `window.__LIGHTRAG_CONFIG__.webuiPrefix` is computed as `LIGHTRAG_API_PREFIX + "/webui/"` and injected for the SPA — you do **not** set it yourself.
 
 There are no longer any frontend `VITE_API_PREFIX` / `VITE_WEBUI_PREFIX` variables. Setting them has no effect (they are ignored by the build).
 
@@ -91,7 +90,6 @@ There are no longer any frontend `VITE_API_PREFIX` / `VITE_WEBUI_PREFIX` variabl
 HOST=0.0.0.0
 PORT=9621
 LIGHTRAG_API_PREFIX=/site01
-LIGHTRAG_WEBUI_PATH=/webui
 WORKING_DIR=/data/site01/storage
 INPUT_DIR=/data/site01/inputs
 LIGHTRAG_API_KEY=site01-secret
@@ -103,7 +101,6 @@ LIGHTRAG_API_KEY=site01-secret
 HOST=0.0.0.0
 PORT=9621
 LIGHTRAG_API_PREFIX=/site02
-LIGHTRAG_WEBUI_PATH=/webui
 WORKING_DIR=/data/site02/storage
 INPUT_DIR=/data/site02/inputs
 LIGHTRAG_API_KEY=site02-secret
@@ -202,13 +199,6 @@ docker run --rm -p 9621:9621 lightrag:latest
 # Same image, different prefixes — runtime decides.
 docker run --rm -e LIGHTRAG_API_PREFIX=/site01 -p 9621:9621 lightrag:latest
 docker run --rm -e LIGHTRAG_API_PREFIX=/site02 -p 9622:9621 lightrag:latest
-
-# Custom in-app mount.
-docker run --rm \
-  -e LIGHTRAG_API_PREFIX=/team-a \
-  -e LIGHTRAG_WEBUI_PATH=/admin-ui \
-  -p 9623:9621 \
-  lightrag:latest
 ```
 
 ### Kubernetes Ingress equivalent
@@ -258,9 +248,7 @@ The dev server mirrors production injection: it serves `index.html` via the same
 | `VITE_BACKEND_URL` | Where the dev server forwards proxied API calls. | `lightrag_webui/.env*` |
 | `VITE_DEV_API_PREFIX` | Prefix to **simulate** (matches the backend LIGHTRAG_API_PREFIX`). Empty → no prefix. | `lightrag_webui/.env*` |
 
-`VITE_DEV_API_PREFIX` injects `apiPrefix` into `window.__LIGHTRAG_CONFIG__` in the browser, mirroring the backend behavior. It also serves as a prefix for `VITE_API_ENDPOINTS`, ensuring correct access to backend APIs.
-
-`VITE_DEV_WEBUI_PREFIX` is also accepted, and the only purpose is injecting `webuiPrefix` to `window.__LIGHTRAG_CONFIG__` for the browser. It only affects the home/logo `<a href>` link inside the SPA — set it to `${VITE_DEV_API_PREFIX}/webui/` if you care about that link in dev, otherwise leave it empty.
+`VITE_DEV_API_PREFIX` injects `apiPrefix` into `window.__LIGHTRAG_CONFIG__` in the browser, mirroring the backend behavior. It also serves as a prefix for `VITE_API_ENDPOINTS`, ensuring correct access to backend APIs. The matching `webuiPrefix` is derived as `${VITE_DEV_API_PREFIX}/webui/` automatically — you don't need a separate variable for it.
 
 Three scenarios cover everything you'll hit:
 
@@ -303,7 +291,6 @@ VITE_BACKEND_URL=http://localhost:9621
 VITE_API_PROXY=true
 VITE_API_ENDPOINTS=/api,/documents,/graphs,/graph,/health,/query,/docs,/redoc,/openapi.json,/login,/auth-status,/static
 VITE_DEV_API_PREFIX=/site01
-VITE_DEV_WEBUI_PREFIX=/site01/webui/
 ```
 
 ```bash
@@ -354,7 +341,6 @@ The key insight: the production nginx is **already** doing the prefix strip. Vit
    VITE_API_PROXY=true
    VITE_API_ENDPOINTS=/api,/documents,/graphs,/graph,/health,/query,/docs,/redoc,/openapi.json,/login,/auth-status,/static
    VITE_DEV_API_PREFIX=/site01
-   VITE_DEV_WEBUI_PREFIX=/site01/webui/
    ```
 3. Run `bun run dev` and open **`http://localhost:5173/`**.
 

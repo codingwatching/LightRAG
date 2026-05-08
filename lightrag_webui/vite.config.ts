@@ -17,10 +17,15 @@ import { normalizeApiPrefix, normalizeWebuiPrefix } from './src/lib/pathPrefix'
  * `lightrag/api/lightrag_server.py`). Doing it in dev too means the SPA
  * always reads its prefix the same way, so behaviour matches between
  * `bun run dev` and a production deploy.
+ *
+ * Only `VITE_DEV_API_PREFIX` is read; the WebUI mount path is fixed at
+ * `/webui` (matching the backend's hardcoded `WEBUI_PATH`), so the
+ * injected `webuiPrefix` follows the production formula
+ * `apiPrefix + "/webui/"` automatically.
  */
 function lightragRuntimeConfigPlugin(env: Record<string, string>): Plugin {
   const apiPrefix = normalizeApiPrefix(env.VITE_DEV_API_PREFIX)
-  const webuiPrefix = normalizeWebuiPrefix(env.VITE_DEV_WEBUI_PREFIX)
+  const webuiPrefix = normalizeWebuiPrefix(apiPrefix ? `${apiPrefix}/webui/` : '')
   const payload = JSON.stringify({ apiPrefix, webuiPrefix }).replace(
     /<\//g,
     '<\\/'

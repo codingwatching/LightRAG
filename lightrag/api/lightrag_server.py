@@ -80,6 +80,15 @@ webui_description = os.getenv("WEBUI_DESCRIPTION")
 auth_configured = bool(auth_handler.accounts)
 
 
+# Fixed WebUI mount path. Used as `app.mount(WEBUI_PATH, ...)` and as the
+# in-app component of `webuiPrefix` injected into window.__LIGHTRAG_CONFIG__
+# (which the browser sees as `LIGHTRAG_API_PREFIX + WEBUI_PATH + "/"`).
+# Not user-configurable: a single mount path simplifies the operator surface
+# and matches how LightRAG is deployed in practice. See
+# docs/MultiSiteDeployment.md.
+WEBUI_PATH = "/webui"
+
+
 class LLMConfigCache:
     """Smart LLM and Embedding configuration cache class"""
 
@@ -387,22 +396,22 @@ def create_app(args):
         + "\n\n[View ReDoc documentation](/redoc)"
     )
 
-    # Normalize API prefix and WebUI mount path. Both accept user input from
-    # CLI/env, so we strip surrounding whitespace, strip a trailing slash
-    # (Starlette's app.mount rejects mount paths ending in '/'), and treat
-    # empty/"/" as "use the default". A leading slash is ensured.
-    def _normalize_path(value: str | None, default: str) -> str:
+    # Normalize the API prefix from CLI/env. Strip surrounding whitespace,
+    # strip a trailing slash, and treat empty/"/" as "no prefix". A leading
+    # slash is ensured. The WebUI mount path is fixed at "/webui" — see
+    # docs/MultiSiteDeployment.md for the rationale.
+    def _normalize_api_prefix(value: str | None) -> str:
         if value is None:
-            return default
+            return ""
         value = value.strip()
         if not value or value == "/":
-            return default
+            return ""
         if not value.startswith("/"):
             value = "/" + value
         return value.rstrip("/")
 
-    api_prefix = _normalize_path(getattr(args, "api_prefix", None), default="")
-    webui_path = _normalize_path(getattr(args, "webui_path", None), default="/webui")
+    api_prefix = _normalize_api_prefix(getattr(args, "api_prefix", None))
+    webui_path = WEBUI_PATH
 
     app_kwargs = {
         "title": "LightRAG Server API",
