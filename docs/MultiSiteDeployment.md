@@ -353,18 +353,6 @@ Rows 2A and 2B share **everything except `VITE_BACKEND_URL`** — the choice is 
 
 ---
 
-## Migration notes
-
-If you were on the previous build-time-prefix model:
-
-- **Stop setting `VITE_API_PREFIX` and `VITE_WEBUI_PREFIX`.** They are ignored by the new build. Remove them from your CI / build scripts.
-- **Drop per-site Docker images.** A single image works for every prefix. CI no longer needs a "build once per site" matrix.
-- **No more "prefix mismatch" warnings at startup.** The
-  `check_webui_build_prefix` function and its banner have been removed — there is nothing to mismatch.
-- **The `lightrag_webui/index.html` template now contains the placeholder comment `<!-- __LIGHTRAG_RUNTIME_CONFIG__ -->`.** If you fork the template, keep that line in `<head>` or the runtime config will not be injected (the SPA falls back to no-prefix defaults).
-
----
-
 ## Troubleshooting
 
 ### Asset URLs 404 when accessing the WebUI
