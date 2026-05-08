@@ -282,6 +282,98 @@ def check_frontend_build():
         return (True, False)  # Assume assets exist and up-to-date on error
 
 
+def check_webui_build_prefix(api_prefix: str, webui_path: str) -> None:
+    """Warn if the WebUI build's baked-in path prefix doesn't match what
+    this server will expose.
+
+    Background: the WebUI is a Vite-built static bundle. `VITE_WEBUI_PREFIX`
+    is statically replaced into `index.html` and the JS chunk imports at
+    `bun run build` time. If an admin later changes `LIGHTRAG_API_PREFIX` /
+    `LIGHTRAG_WEBUI_PATH` without rebuilding (e.g. when reusing a single
+    image across multiple sites), `index.html` still loads, but every
+    `<script src=...>` and `<link href=...>` points at the OLD prefix and
+    404s — a confusing failure mode that's easy to miss in browser logs.
+
+    This check parses one asset reference from the built `index.html`,
+    derives the prefix that was baked in, and compares it to the
+    browser-visible path = api_prefix + webui_path + "/" — the same formula
+    documented in `env.example`. If they disagree it prints a loud warning
+    with the exact command to rebuild.
+
+    Args:
+        api_prefix: normalized LIGHTRAG_API_PREFIX (e.g. "/site01" or "")
+        webui_path: normalized LIGHTRAG_WEBUI_PATH (e.g. "/webui")
+    """
+    index_html = Path(__file__).parent / "webui" / "index.html"
+    if not index_html.exists():
+        # No build to check — `check_frontend_build` already warned.
+        return
+
+    try:
+        html = index_html.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.warning(f"Could not read WebUI index.html for prefix check: {e}")
+        return
+
+    # Vite emits assets under `<base>assets/...` (see assetFileNames). Pull
+    # the prefix out of the first such reference. Match either src= or href=
+    # to cover <script> and <link> tags.
+    match = re.search(r'(?:src|href)="([^"]*?)/assets/[^"]*"', html)
+    if not match:
+        # Build artifact format unexpected — skip silently rather than
+        # spam a warning the admin can't act on.
+        logger.debug("Could not infer WebUI baked prefix from index.html")
+        return
+
+    baked_prefix = match.group(1) + "/"
+    expected_prefix = f"{api_prefix}{webui_path}/"
+
+    if baked_prefix == expected_prefix:
+        logger.info(f"WebUI build prefix matches server config: {expected_prefix}")
+        return
+
+    # Structured warning so log aggregators / tests can pick it up.
+    rebuild_cmd = (
+        ("VITE_API_PREFIX=" + api_prefix + " " if api_prefix else "")
+        + "VITE_WEBUI_PREFIX="
+        + expected_prefix
+        + " bun run build"
+    )
+    logger.warning(
+        "WebUI build prefix mismatch: built with %s but server will expose"
+        " at %s (LIGHTRAG_API_PREFIX=%s + LIGHTRAG_WEBUI_PATH=%s + '/')."
+        " Asset URLs will 404 until the WebUI is rebuilt with: %s",
+        baked_prefix,
+        expected_prefix,
+        api_prefix or "<empty>",
+        webui_path,
+        rebuild_cmd,
+    )
+
+    # Banner duplicates the warning for an operator watching the splash —
+    # easy to miss a single log line among startup chatter.
+    ASCIIColors.yellow("\n" + "=" * 80)
+    ASCIIColors.yellow("WARNING: WebUI Build Prefix Mismatch")
+    ASCIIColors.yellow("=" * 80)
+    ASCIIColors.yellow(f"WebUI was built with prefix:    {baked_prefix}")
+    ASCIIColors.yellow(f"This server will expose it at:  {expected_prefix}")
+    ASCIIColors.yellow(
+        f"  (LIGHTRAG_API_PREFIX={api_prefix or '<empty>'}"
+        f' + LIGHTRAG_WEBUI_PATH={webui_path} + "/")\n'
+    )
+    ASCIIColors.yellow("The WebUI HTML will load, but its asset URLs (JS/CSS) will 404")
+    ASCIIColors.yellow(
+        "because they were baked at build time. Rebuild the WebUI with:\n"
+    )
+    ASCIIColors.cyan("    cd lightrag_webui")
+    if api_prefix:
+        ASCIIColors.cyan(f"    VITE_API_PREFIX={api_prefix} \\")
+    ASCIIColors.cyan(f"    VITE_WEBUI_PREFIX={expected_prefix} \\")
+    ASCIIColors.cyan("    bun run build")
+    ASCIIColors.cyan("    cd ..")
+    ASCIIColors.yellow("=" * 80 + "\n")
+
+
 def create_app(args):
     # Check frontend build first and get status
     webui_assets_exist, is_frontend_outdated = check_frontend_build()
@@ -385,6 +477,7 @@ def create_app(args):
         + (" (API-Key Enabled)" if api_key else "")
         + "\n\n[View ReDoc documentation](/redoc)"
     )
+
     # Normalize API prefix and WebUI mount path. Both accept user input from
     # CLI/env, so we strip surrounding whitespace, strip a trailing slash
     # (Starlette's app.mount rejects mount paths ending in '/'), and treat
@@ -401,6 +494,12 @@ def create_app(args):
 
     api_prefix = _normalize_path(getattr(args, "api_prefix", None), default="")
     webui_path = _normalize_path(getattr(args, "webui_path", None), default="/webui")
+
+    # Loud warning at startup if the WebUI build's baked prefix disagrees
+    # with the prefix this server will expose. Skipped when no build exists
+    # (check_frontend_build already warned about that).
+    if webui_assets_exist:
+        check_webui_build_prefix(api_prefix, webui_path)
 
     app_kwargs = {
         "title": "LightRAG Server API",

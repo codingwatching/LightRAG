@@ -406,3 +406,106 @@ class TestPathNormalization:
         client = TestClient(app)
         response = client.get("/webui/")
         assert response.status_code in (200, 307, 404)
+
+
+class TestCheckWebuiBuildPrefix:
+    """Direct tests for check_webui_build_prefix.
+
+    These exercise an isolated index.html written to a temp dir, with the
+    function's baked-in path patched, so the test does not depend on
+    whatever prefix the committed `lightrag/api/webui/` happens to carry.
+    """
+
+    def _stage_index_html(self, tmp_path, baked_prefix):
+        """Stage a minimal index.html under tmp_path/webui/ mimicking Vite
+        output. The check function reads `Path(__file__).parent / "webui"
+        / "index.html"`, so callers must also patch `lightrag_server.__file__`
+        to point inside tmp_path."""
+        prefix_no_slash = baked_prefix.rstrip("/")
+        webui_dir = tmp_path / "webui"
+        webui_dir.mkdir()
+        (webui_dir / "index.html").write_text(
+            "<!doctype html><html><head>"
+            f'<script type="module" crossorigin src="{prefix_no_slash}/assets/index-X.js"></script>'
+            f'<link rel="stylesheet" href="{prefix_no_slash}/assets/index-X.css">'
+            "</head><body></body></html>",
+            encoding="utf-8",
+        )
+
+    def test_match_emits_info_log_and_no_warning(self, tmp_path, monkeypatch, caplog):
+        import logging
+
+        # Importing lightrag.api.lightrag_server eagerly evaluates
+        # `global_args.whitelist_paths` in utils_api at module top, which
+        # calls parse_args() against the current sys.argv. Under pytest
+        # that's the pytest invocation argv → argparse exits 2. Force a
+        # benign argv before the (potentially-fresh) module import.
+        monkeypatch.setattr(sys, "argv", ["lightrag-server"])
+        from lightrag.api import lightrag_server
+
+        self._stage_index_html(tmp_path, "/site01/webui/")
+        monkeypatch.setattr(
+            lightrag_server, "__file__", str(tmp_path / "lightrag_server.py")
+        )
+
+        # The lightrag logger has propagate=False; caplog attaches its
+        # handler at the root, so without re-enabling propagation we can't
+        # observe records here. Restore on teardown via monkeypatch.
+        lightrag_logger = logging.getLogger("lightrag")
+        monkeypatch.setattr(lightrag_logger, "propagate", True)
+        with caplog.at_level(logging.INFO, logger="lightrag"):
+            lightrag_server.check_webui_build_prefix(
+                api_prefix="/site01", webui_path="/webui"
+            )
+
+        # Match path: only an info log, no warning record.
+        assert "matches server config" in caplog.text
+        assert not any(
+            r.levelno >= logging.WARNING for r in caplog.records
+        ), "match path must not emit a warning"
+
+    def test_mismatch_emits_warning_with_rebuild_command(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        import logging
+
+        monkeypatch.setattr(sys, "argv", ["lightrag-server"])
+        from lightrag.api import lightrag_server
+
+        # Build was made with /webui/ but admin reconfigures the server
+        # for site01 — classic "reused image, new prefix" failure mode.
+        self._stage_index_html(tmp_path, "/webui/")
+        monkeypatch.setattr(
+            lightrag_server, "__file__", str(tmp_path / "lightrag_server.py")
+        )
+
+        lightrag_logger = logging.getLogger("lightrag")
+        monkeypatch.setattr(lightrag_logger, "propagate", True)
+        with caplog.at_level(logging.WARNING, logger="lightrag"):
+            lightrag_server.check_webui_build_prefix(
+                api_prefix="/site01", webui_path="/webui"
+            )
+
+        warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert warning_records, "mismatch must emit a WARNING-level record"
+        msg = warning_records[0].getMessage()
+        # Show the actual baked vs expected values so admin can act.
+        assert "/webui/" in msg
+        assert "/site01/webui/" in msg
+        # Suggest a runnable rebuild command with the corrected env vars.
+        assert "VITE_WEBUI_PREFIX=/site01/webui/" in msg
+        assert "VITE_API_PREFIX=/site01" in msg
+
+    def test_missing_build_does_not_raise(self, tmp_path, monkeypatch):
+        """When index.html is absent (no build yet), the function returns
+        silently — `check_frontend_build` already emits the build warning."""
+        monkeypatch.setattr(sys, "argv", ["lightrag-server"])
+        from lightrag.api import lightrag_server
+
+        monkeypatch.setattr(
+            lightrag_server, "__file__", str(tmp_path / "lightrag_server.py")
+        )
+        # No webui/ subdir under tmp_path — index.html does not exist.
+        lightrag_server.check_webui_build_prefix(
+            api_prefix="/site01", webui_path="/webui"
+        )
