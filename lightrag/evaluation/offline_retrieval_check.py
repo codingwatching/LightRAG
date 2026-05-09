@@ -157,10 +157,18 @@ def audit_samples(
             raise ValueError(f"No oracle entry for question: {question}")
 
         query_tokens = tokenize(question)
-        ranked = sorted(
-            documents,
-            key=lambda doc: (-score_query(query_tokens, doc, idf), doc.name),
-        )
+        scored_documents = [
+            (score_query(query_tokens, document, idf), document)
+            for document in documents
+        ]
+        ranked = [
+            document
+            for score, document in sorted(
+                scored_documents,
+                key=lambda item: (-item[0], item[1].name),
+            )
+            if score > 0
+        ]
         results.append(
             QueryResult(
                 question=question,
