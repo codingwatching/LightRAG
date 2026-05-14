@@ -22,7 +22,6 @@ pytest.importorskip(
     reason="opensearchpy is required for OpenSearch storage tests",
 )
 
-from opensearchpy.exceptions import NotFoundError, OpenSearchException  # type: ignore
 from lightrag.kg.opensearch_impl import (
     OpenSearchGraphStorage,
     ClientManager,
@@ -73,9 +72,16 @@ def embed_func():
 
 def _make_client():
     from opensearchpy import AsyncOpenSearch
+
     client = AsyncMock(spec=AsyncOpenSearch)
+    # opensearchpy decorates client methods with @query_params, which hides their
+    # coroutine nature from inspect.iscoroutinefunction. AsyncMock(spec=...) then
+    # creates plain MagicMocks for them, so callers awaiting client.search(...) hit
+    # "object dict can't be used in 'await' expression". Force AsyncMock explicitly.
+    client.search = AsyncMock()
     client.indices = AsyncMock()
-    client.indices.exists.return_value = True
+    client.indices.exists = AsyncMock(return_value=True)
+    client.indices.refresh = AsyncMock()
     client.transport = AsyncMock()
     return client
 
@@ -132,12 +138,12 @@ class TestWildcardInjection:
         # but the inner user-provided * and ? must be escaped
         # Expected: *test\*\?foo* (with the user's * and ? escaped)
         inner_value = wildcard_clause[1:-1]  # strip leading and trailing *
-        assert "\\*" in inner_value, (
-            f"User's '*' should be escaped as '\\*' in wildcard, got: {wildcard_clause}"
-        )
-        assert "\\?" in inner_value, (
-            f"User's '?' should be escaped as '\\?' in wildcard, got: {wildcard_clause}"
-        )
+        assert (
+            "\\*" in inner_value
+        ), f"User's '*' should be escaped as '\\*' in wildcard, got: {wildcard_clause}"
+        assert (
+            "\\?" in inner_value
+        ), f"User's '?' should be escaped as '\\?' in wildcard, got: {wildcard_clause}"
 
     @pytest.mark.asyncio
     async def test_wildcard_heavy_pattern_not_exploitable(self, graph_storage):
@@ -163,10 +169,10 @@ class TestWildcardInjection:
         # The value between the outer * delimiters should have all ? escaped
         inner = wildcard_clause[1:-1]
         # Count unescaped ? (i.e., ? not preceded by \)
-        unescaped_q = re.findall(r'(?<!\\)\?', inner)
-        assert len(unescaped_q) == 0, (
-            f"Found {len(unescaped_q)} unescaped '?' in wildcard pattern: {wildcard_clause}"
-        )
+        unescaped_q = re.findall(r"(?<!\\)\?", inner)
+        assert (
+            len(unescaped_q) == 0
+        ), f"Found {len(unescaped_q)} unescaped '?' in wildcard pattern: {wildcard_clause}"
 
     @pytest.mark.asyncio
     async def test_backslash_escaped_in_wildcard(self, graph_storage):
@@ -190,9 +196,9 @@ class TestWildcardInjection:
         # The backslash should be escaped first, then the * — so we get \\\\\\*
         # In the final pattern between outer *...*, user's \ becomes \\ and * becomes \*
         inner = wildcard_clause[1:-1]
-        assert "\\\\" in inner or "\\*" in inner, (
-            f"Backslash and * from user should be escaped in wildcard: {wildcard_clause}"
-        )
+        assert (
+            "\\\\" in inner or "\\*" in inner
+        ), f"Backslash and * from user should be escaped in wildcard: {wildcard_clause}"
 
 
 class TestPPLInjection:
@@ -201,9 +207,9 @@ class TestPPLInjection:
     def test_escape_ppl_basic_quote(self, graph_storage):
         """Single quotes should be escaped."""
         result = graph_storage._escape_ppl("it's a test")
-        assert "'" not in result.replace("\\'", ""), (
-            f"Unescaped quote found in: {result}"
-        )
+        assert "'" not in result.replace(
+            "\\'", ""
+        ), f"Unescaped quote found in: {result}"
 
     def test_escape_ppl_backslash(self, graph_storage):
         """Backslashes should be escaped."""
